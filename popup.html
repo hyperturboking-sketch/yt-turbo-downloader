@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=360">
+<title>YT Turbo</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    width:360px;min-height:200px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    background:#0f0f0f;color:#e1e1e1;padding:0;
+  }
+
+  .header{
+    background:linear-gradient(135deg,#1a1a2e,#16213e);
+    padding:16px 20px;border-bottom:1px solid #222;
+    display:flex;align-items:center;gap:10px;
+  }
+  .header .logo{font-size:22px;font-weight:800;letter-spacing:-1px}
+  .header .logo span{color:#ff4444}
+  .header .version{font-size:11px;color:#666;margin-left:auto}
+
+  .main{padding:16px 20px}
+
+  .url-bar{
+    display:flex;gap:6px;margin-bottom:12px;
+  }
+  .url-bar input{
+    flex:1;background:#1a1a1a;border:1px solid #333;border-radius:8px;
+    padding:10px 12px;color:#e1e1e1;font-size:13px;outline:none;
+  }
+  .url-bar input:focus{border-color:#ff4444}
+  .url-bar input::placeholder{color:#555}
+
+  .btn{
+    border:none;border-radius:8px;padding:10px 16px;font-size:13px;
+    font-weight:600;cursor:pointer;transition:all .15s;
+    display:inline-flex;align-items:center;gap:6px;
+  }
+  .btn-primary{background:#ff4444;color:#fff}
+  .btn-primary:hover{background:#cc0000}
+  .btn-primary:disabled{background:#333;color:#666;cursor:not-allowed}
+  .btn-icon{background:transparent;color:#aaa;padding:8px;border-radius:6px}
+  .btn-icon:hover{background:#222;color:#fff}
+
+  .video-card{
+    background:#1a1a1a;border:1px solid #262626;border-radius:10px;
+    padding:12px;display:none;gap:10px;margin-bottom:12px;
+    animation:fadeIn .2s ease;
+  }
+  .video-card.show{display:flex}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+  .video-card img{
+    width:120px;height:68px;object-fit:cover;border-radius:6px;
+    background:#222;flex-shrink:0;
+  }
+  .video-info{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .video-info .title{
+    font-size:12px;font-weight:600;line-height:1.3;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  }
+  .video-info .meta{font-size:11px;color:#888}
+
+  .quality-row{
+    display:flex;gap:6px;align-items:center;margin-bottom:12px;
+  }
+  .quality-row label{font-size:12px;color:#888}
+  select{
+    background:#1a1a1a;color:#e1e1e1;border:1px solid #333;
+    border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;outline:none;
+    flex:1;
+  }
+  select:focus{border-color:#ff4444}
+
+  .download-btn{
+    width:100%;padding:12px;font-size:14px;border-radius:10px;
+    background:linear-gradient(135deg,#ff4444,#cc0000);color:#fff;
+    border:none;font-weight:700;cursor:pointer;transition:all .15s;
+  }
+  .download-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(255,68,68,.3)}
+  .download-btn:active{transform:translateY(0)}
+  .download-btn:disabled{background:#333;color:#666;cursor:not-allowed;transform:none;box-shadow:none}
+
+  .progress{
+    margin-top:10px;display:none;
+  }
+  .progress.show{display:block}
+  .progress-bar{
+    height:4px;background:#222;border-radius:2px;overflow:hidden;
+  }
+  .progress-bar .fill{
+    height:100%;background:linear-gradient(90deg,#ff4444,#ff6666);
+    width:0%;transition:width .3s;border-radius:2px;
+  }
+  .progress-text{font-size:11px;color:#888;margin-top:4px;text-align:center}
+
+  .status{
+    margin-top:10px;padding:8px 12px;border-radius:8px;
+    font-size:12px;text-align:center;display:none;
+  }
+  .status.show{display:block}
+  .status.success{background:#0a2a0a;color:#4caf50;border:1px solid #1a3a1a}
+  .status.error{background:#2a0a0a;color:#ef5350;border:1px solid #3a1a1a}
+
+  .footer{
+    padding:10px 20px;border-top:1px solid #222;
+    display:flex;justify-content:space-between;align-items:center;
+  }
+  .footer .stats{font-size:10px;color:#555}
+  .footer a{font-size:10px;color:#ff4444;text-decoration:none}
+  .footer a:hover{text-decoration:underline}
+
+  .spinner{
+    width:14px;height:14px;border:2px solid rgba(255,255,255,.3);
+    border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite;
+    display:inline-block;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .empty-state{
+    text-align:center;padding:30px 20px;color:#555;
+  }
+  .empty-state .icon{font-size:36px;margin-bottom:8px}
+  .empty-state p{font-size:12px;line-height:1.5}
+
+  .pro-badge{
+    background:linear-gradient(135deg,#ff9800,#ff5722);
+    color:#fff;font-size:10px;font-weight:800;padding:2px 8px;
+    border-radius:10px;letter-spacing:1px;
+  }
+  .btn-upgrade{
+    background:linear-gradient(135deg,#ff9800,#ff5722);color:#fff;
+    border:none;border-radius:6px;padding:6px 10px;font-size:11px;
+    font-weight:700;cursor:pointer;white-space:nowrap;
+  }
+  .btn-upgrade:hover{opacity:.9}
+
+  .modal-overlay{
+    display:none;position:fixed;top:0;left:0;right:0;bottom:0;
+    background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center;
+    backdrop-filter:blur(4px);
+  }
+  .modal-overlay.show{display:flex}
+  .modal{
+    background:#1a1a1a;border:1px solid #333;border-radius:16px;
+    padding:28px 24px;width:320px;position:relative;text-align:center;
+    animation:modalIn .25s ease;
+  }
+  @keyframes modalIn{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:none}}
+
+  .modal-close{
+    position:absolute;top:12px;right:14px;background:none;border:none;
+    color:#666;font-size:16px;cursor:pointer;padding:4px 8px;border-radius:4px;
+  }
+  .modal-close:hover{background:#222;color:#fff}
+  .modal-icon{font-size:40px;margin-bottom:8px}
+  .modal h2{font-size:18px;font-weight:700;margin-bottom:4px}
+  .modal-desc{font-size:12px;color:#888;margin-bottom:16px}
+
+  .modal-features{text-align:left;margin-bottom:16px}
+  .feature{
+    display:flex;align-items:center;gap:8px;padding:6px 0;
+    font-size:13px;color:#ccc;
+  }
+  .feature .check{color:#4caf50;font-weight:700}
+
+  .price{
+    font-size:28px;font-weight:800;color:#fff;margin-bottom:4px;
+  }
+  .price span{font-size:12px;color:#888;font-weight:400}
+
+  .buy-btn{
+    display:block;width:100%;padding:12px;border-radius:10px;
+    background:linear-gradient(135deg,#ff9800,#ff5722);color:#fff;
+    text-decoration:none;font-weight:700;font-size:14px;
+    transition:all .15s;margin-bottom:16px;
+  }
+  .buy-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(255,152,0,.3)}
+
+  .divider{
+    font-size:11px;color:#555;margin-bottom:12px;position:relative;
+  }
+  .divider::before,.divider::after{
+    content:'';position:absolute;top:50%;width:60px;height:1px;background:#333;
+  }
+  .divider::before{left:0}
+  .divider::after{right:0}
+
+  .license-row{display:flex;gap:6px;margin-bottom:8px}
+  .license-row input{
+    flex:1;background:#111;border:1px solid #333;border-radius:8px;
+    padding:10px 12px;color:#e1e1e1;font-size:12px;font-family:monospace;
+    outline:none;letter-spacing:1px;
+  }
+  .license-row input:focus{border-color:#ff9800}
+  .license-row input::placeholder{color:#444;letter-spacing:0}
+
+  .btn-activate{
+    background:#333;color:#e1e1e1;border:none;border-radius:8px;
+    padding:10px 16px;font-size:12px;font-weight:600;cursor:pointer;
+  }
+  .btn-activate:hover{background:#444}
+  .btn-activate:disabled{opacity:.5;cursor:not-allowed}
+
+  .license-status{
+    font-size:12px;min-height:18px;margin-top:4px;display:none;
+  }
+  .license-status.show{display:block}
+  .license-status.success{color:#4caf50}
+  .license-status.error{color:#ef5350}
+
+  .format-toggle{
+    display:flex;background:#1a1a1a;border:1px solid #333;border-radius:8px;
+    padding:3px;margin-bottom:12px;
+  }
+  .format-toggle button{
+    flex:1;padding:8px;border:none;border-radius:6px;font-size:12px;
+    font-weight:600;cursor:pointer;transition:all .15s;background:transparent;color:#888;
+  }
+  .format-toggle button.active{background:#ff4444;color:#fff}
+  .format-toggle button:not(.active):hover{color:#ccc}
+
+  .audio-row{display:none;gap:6px;align-items:center;margin-bottom:12px}
+  .audio-row.show{display:flex}
+  .audio-row label{font-size:12px;color:#888}
+  .audio-row select{flex:1}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo"><span>YT</span> Turbo</div>
+  <span class="pro-badge" id="proBadge" style="display:none">PRO</span>
+  <div class="version">v1.0</div>
+</div>
+
+<div class="main">
+  <div class="url-bar">
+    <input type="text" id="urlInput" placeholder="Paste YouTube URL or browse to a video..." autocomplete="off" spellcheck="false">
+    <button class="btn btn-icon" id="pasteBtn" title="Paste from clipboard">📋</button>
+  </div>
+
+  <div id="emptyState" class="empty-state">
+    <div class="icon">🎬</div>
+    <p>Paste a YouTube URL or navigate to any<br>YouTube video and click the extension icon</p>
+  </div>
+
+  <div id="videoCard" class="video-card">
+    <img id="thumb" src="" alt="thumbnail">
+    <div class="video-info">
+      <div class="title" id="title"></div>
+      <div class="meta" id="meta"></div>
+    </div>
+  </div>
+
+  <div class="format-toggle" id="formatToggle" style="display:none">
+    <button class="active" data-format="video">Video</button>
+    <button data-format="audio">Audio</button>
+  </div>
+
+  <div class="quality-row" id="qualityRow" style="display:none">
+    <label>Quality:</label>
+    <select id="qualitySelect">
+      <option value="2160">2160p (4K)</option>
+      <option value="1440">1440p (2K)</option>
+      <option value="1080" selected>1080p</option>
+      <option value="720">720p</option>
+      <option value="480">480p</option>
+      <option value="360">360p</option>
+    </select>
+    <button class="btn-upgrade" id="upgradeBtn" style="display:none">⚡ PRO</button>
+  </div>
+
+  <div class="audio-row" id="audioRow">
+    <label>Audio:</label>
+    <select id="audioSelect">
+      <option value="high">High (256kbps+)</option>
+      <option value="medium" selected>Medium (128kbps)</option>
+      <option value="low">Low (64kbps)</option>
+    </select>
+  </div>
+
+  <button class="download-btn" id="dlBtn" disabled>
+    <span id="dlBtnText">Download</span>
+  </button>
+
+  <div class="progress" id="progress">
+    <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+    <div class="progress-text" id="progressText">Preparing...</div>
+  </div>
+
+  <div class="status" id="status"></div>
+</div>
+
+<div class="footer">
+  <div class="stats" id="stats">Downloads today: 0</div>
+  <a href="#" id="settingsLink">Settings</a>
+</div>
+
+<!-- Upgrade Modal -->
+<div class="modal-overlay" id="upgradeModal">
+  <div class="modal">
+    <button class="modal-close" id="closeModal">✕</button>
+    <div class="modal-icon">⚡</div>
+    <h2>Upgrade to PRO</h2>
+    <p class="modal-desc">Unlock the highest quality YouTube downloads</p>
+    <div class="modal-features">
+      <div class="feature"><span class="check">✓</span> 1440p (2K) downloads</div>
+      <div class="feature"><span class="check">✓</span> 4K (2160p) downloads</div>
+      <div class="feature"><span class="check">✓</span> Best quality available</div>
+      <div class="feature"><span class="check">✓</span> Lifetime access</div>
+    </div>
+    <div class="price">$2.99 <span>one-time</span></div>
+    <a href="https://your-store.com/buy/ytturbo-pro" target="_blank" class="buy-btn">Buy License Key</a>
+    <div class="divider">or enter existing key</div>
+    <div class="license-row">
+      <input type="text" id="licenseInput" placeholder="YTT-XXXXXX-XXXXXX" autocomplete="off" spellcheck="false">
+      <button class="btn-activate" id="activateBtn">Activate</button>
+    </div>
+    <div class="license-status" id="licenseStatus"></div>
+  </div>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

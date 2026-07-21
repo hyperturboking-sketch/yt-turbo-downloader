@@ -1,0 +1,31 @@
+#yt-turbo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  margin: 0 4px;
+  background: linear-gradient(135deg, #ff4444, #cc0000);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: 'Roboto', Arial, sans-serif;
+  vertical-align: middle;
+}
+
+#yt-turbo-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 2px 12px rgba(255, 68, 68, 0.4);
+}
+
+#yt-turbo-btn:active {
+  transform: scale(0.98);
+}
+
+#yt-turbo-btn svg {
+  width: 16px;
+  height: 16px;
+}
