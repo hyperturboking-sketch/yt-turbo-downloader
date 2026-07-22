@@ -38,7 +38,7 @@ let lastUrl = '';
 function checkUrl() {
   if (window.location.href !== lastUrl) {
     lastUrl = window.location.href;
-    if (/youtube\.com\/watch/.test(lastUrl)) {
+    if (/youtube\.com\/(watch|shorts)/.test(lastUrl)) {
       setTimeout(addDownloadButton, 1500);
     }
   }

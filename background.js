@@ -67,18 +67,33 @@ async function getMachineId() {
   return id;
 }
 
-const INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
-const INNERTUBE_CLIENT = {
-  clientName: 'WEB',
-  clientVersion: '2.20241126.01.00',
-  hl: 'en',
-  gl: 'US',
-};
+const INNERTUBE_CLIENTS = [
+  {
+    clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+    clientVersion: '2.0',
+    hl: 'en',
+    gl: 'US',
+    clientScreen: 'EMBED',
+  },
+  {
+    clientName: 'MWEB',
+    clientVersion: '2.20250722.01.00',
+    hl: 'en',
+    gl: 'US',
+  },
+  {
+    clientName: 'WEB',
+    clientVersion: '2.20250722.01.00',
+    hl: 'en',
+    gl: 'US',
+  },
+];
 
 function extractVideoId(url) {
   const patterns = [
     /(?:v=|\/v\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
     /(?:embed\/)([a-zA-Z0-9_-]{11})/,
+    /(?:shorts\/)([a-zA-Z0-9_-]{11})/,
     /^([a-zA-Z0-9_-]{11})$/,
   ];
   for (const pat of patterns) {
@@ -89,22 +104,38 @@ function extractVideoId(url) {
 }
 
 async function callInnertube(videoId, endpoint = 'player') {
-  const payload = {
-    context: { client: INNERTUBE_CLIENT },
-    videoId,
-  };
+  for (const client of INNERTUBE_CLIENTS) {
+    try {
+      const payload = {
+        context: { client },
+        videoId,
+      };
 
-  const resp = await fetch(
-    `https://www.youtube.com/youtubei/v1/${endpoint}?key=${INNERTUBE_API_KEY}&prettyPrint=false`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }
-  );
+      const resp = await fetch(
+        `https://www.youtube.com/youtubei/v1/${endpoint}?prettyPrint=false`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Youtube-Client-Name': '85',
+            'X-Youtube-Client-Version': client.clientVersion,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+            'Origin': 'https://www.youtube.com',
+            'Referer': 'https://www.youtube.com/',
+          },
+          body: JSON.stringify(payload),
+        }
+      );
 
-  if (!resp.ok) throw new Error(`Innertube API error: ${resp.status}`);
-  return resp.json();
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.streamingData?.formats?.length || data.streamingData?.adaptiveFormats?.length) {
+          return data;
+        }
+      }
+    } catch {}
+  }
+  throw new Error('All Innertube clients failed. YouTube may be blocking requests.');
 }
 
 function pickFormat(formats, maxH) {

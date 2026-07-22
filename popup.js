@@ -23,7 +23,7 @@ async function init() {
   updateProUI();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab && /youtube\.com\/watch/.test(tab.url)) {
+  if (tab && /youtube\.com\/(watch|shorts)/.test(tab.url)) {
     $('urlInput').value = tab.url;
     fetchVideo(tab.url);
   }
@@ -75,7 +75,7 @@ $('pasteBtn').addEventListener('click', async () => {
   try {
     const text = await navigator.clipboard.readText();
     $('urlInput').value = text;
-    if (/youtube\.com|youtu\.be/.test(text)) fetchVideo(text);
+    if (/youtube\.com\/(watch|shorts)|youtu\.be/.test(text)) fetchVideo(text);
   } catch {}
 });
 
@@ -88,7 +88,7 @@ $('urlInput').addEventListener('keydown', e => {
 
 $('urlInput').addEventListener('input', () => {
   const url = $('urlInput').value.trim();
-  if (/youtube\.com|youtu\.be/.test(url)) fetchVideo(url);
+  if (/youtube\.com\/(watch|shorts)|youtu\.be/.test(url)) fetchVideo(url);
   else {
     $('videoCard').classList.remove('show');
     $('qualityRow').style.display = 'none';
