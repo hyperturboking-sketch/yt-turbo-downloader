@@ -58,12 +58,11 @@ function sanitizeFilename(name) {
   return (name || 'video').replace(/[<>:"/\\|?*\n\r]/g, '_').replace(/\s+/g, ' ').trim().substring(0, 150);
 }
 
-// --- Get video data: content script on YouTube page (same-origin, has cookies) ---
+// --- Get video data: content script on YouTube page ---
 async function getPageData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
 
-  // Find the YouTube tab with this video
   const tabs = await chrome.tabs.query({ url: '*://www.youtube.com/*' });
   let targetTab = null;
   for (const tab of tabs) {
@@ -74,7 +73,7 @@ async function getPageData(url) {
     throw new Error('Navigate to this video on YouTube first, then try again.');
   }
 
-  // Ensure content script is injected
+  // Inject content script (idempotent — content.js guards against duplicate setup)
   try {
     await chrome.scripting.executeScript({
       target: { tabId: targetTab.id },
@@ -82,10 +81,8 @@ async function getPageData(url) {
     });
   } catch {}
 
-  // Wait for content script to be ready
   await new Promise(r => setTimeout(r, 500));
 
-  // Ask content script to get data (it runs on youtube.com with cookies)
   try {
     const response = await chrome.tabs.sendMessage(targetTab.id, {
       type: 'GET_PAGE_DATA',
@@ -96,7 +93,6 @@ async function getPageData(url) {
     if (response?.formats?.length) return response;
   } catch (e) {
     if (e.message?.includes('Could not establish connection')) {
-      // Content script not ready, wait and retry
       await new Promise(r => setTimeout(r, 1000));
       const retry = await chrome.tabs.sendMessage(targetTab.id, { type: 'GET_PAGE_DATA', videoId });
       if (!retry?.error && retry?.formats?.length) return retry;
@@ -109,14 +105,19 @@ async function getPageData(url) {
 
 // --- Format picking ---
 function pickFormat(formats, maxH) {
-  const vf = formats.filter(f => f.mimeType?.startsWith('video/') && f.url && f.url.includes('googlevideo.com'));
-  const sorted = vf.filter(f => !maxH || (f.height && f.height <= maxH))
+  const vf = formats.filter(f =>
+    f.mimeType?.startsWith('video/') && f.url && f.url.includes('googlevideo.com')
+  );
+  const sorted = vf
+    .filter(f => !maxH || (f.height && f.height <= maxH))
     .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bitrate || 0) - (a.bitrate || 0));
   return sorted.find(f => f.mimeType?.includes('avc1')) || sorted[0];
 }
 
 function pickBestAudio(formats, qualityTier) {
-  const af = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url && f.url.includes('googlevideo.com'));
+  const af = formats.filter(f =>
+    f.mimeType?.startsWith('audio/') && f.url && f.url.includes('googlevideo.com')
+  );
   if (!af.length) return null;
   const m4a = af.filter(f => f.mimeType?.includes('mp4') || f.mimeType?.includes('audio/mp4'));
   const sorted = m4a.length ? m4a : af;
@@ -128,15 +129,17 @@ function pickBestAudio(formats, qualityTier) {
 // --- Fetch info ---
 async function fetchInfo(url) {
   const data = await getPageData(url);
-  return { ...data, formats: (data.formats || []).filter(f =>
-    f.mimeType?.includes('avc1') && f.url && f.url.includes('googlevideo.com')
-  ).sort((a, b) => (b.height || 0) - (a.height || 0)) };
+  return {
+    ...data,
+    formats: (data.formats || [])
+      .filter(f => f.mimeType?.includes('avc1') && f.url && f.url.includes('googlevideo.com'))
+      .sort((a, b) => (b.height || 0) - (a.height || 0)),
+  };
 }
 
 // --- Download ---
 function isValidStreamUrl(url) {
   if (!url || typeof url !== 'string') return false;
-  // Must be from YouTube's video CDN
   return url.includes('googlevideo.com') || url.includes('videoplayback');
 }
 
@@ -153,29 +156,54 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
     const best = pickBestAudio(all, audioQuality);
     if (!best?.url || !isValidStreamUrl(best.url)) throw new Error('No valid audio stream found.');
     filename = `${filename}.${best.mimeType?.includes('webm') ? 'webm' : 'm4a'}`;
-    await chrome.downloads.download({ url: best.url, filename, saveAs: false });
-    return { success: true, filename };
+    const downloadId = await chrome.downloads.download({ url: best.url, filename, saveAs: false });
+    return { success: true, filename, downloadId };
   }
 
-  // Combined (has audio)
-  const combined = all.filter(f => isValidStreamUrl(f.url) && f.audioQuality && f.height && f.height <= maxH)
+  // Try combined formats (video + audio) — use audioChannels to detect
+  const combined = all
+    .filter(f => isValidStreamUrl(f.url) && f.audioChannels && f.height && f.height <= maxH)
     .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
   if (combined?.url) {
     filename = `${filename}.${combined.mimeType?.includes('webm') ? 'webm' : 'mp4'}`;
-    await chrome.downloads.download({ url: combined.url, filename, saveAs: false });
-    return { success: true, filename };
+    const downloadId = await chrome.downloads.download({ url: combined.url, filename, saveAs: false });
+    return { success: true, filename, downloadId };
   }
 
-  // Video only
+  // Fallback: video-only stream
   const best = pickFormat(all, maxH);
   if (best?.url && isValidStreamUrl(best.url)) {
     filename = `${filename}.${best.mimeType?.includes('webm') ? 'webm' : 'mp4'}`;
-    await chrome.downloads.download({ url: best.url, filename, saveAs: false });
-    return { success: true, filename, note: 'Video only (no audio)' };
+    const downloadId = await chrome.downloads.download({ url: best.url, filename, saveAs: false });
+    return { success: true, filename, downloadId, note: 'Video only (no audio)' };
   }
 
   throw new Error('No valid download stream found. The video may require sign-in.');
 }
+
+// --- Download progress tracking ---
+chrome.downloads.onChanged.addListener((delta) => {
+  if (delta.state) {
+    const states = { complete: 'Download complete', interrupted: 'Download failed' };
+    const stateMsg = states[delta.state.current];
+    if (stateMsg) {
+      chrome.runtime.sendMessage({
+        type: 'DOWNLOAD_PROGRESS',
+        downloadId: delta.id,
+        state: delta.state.current,
+        message: delta.state.current === 'interrupted' ? `${stateMsg}: ${delta.error?.current || 'unknown error'}` : stateMsg,
+      }).catch(() => {});
+    }
+  }
+  if (delta.bytesReceived) {
+    chrome.runtime.sendMessage({
+      type: 'DOWNLOAD_PROGRESS',
+      downloadId: delta.id,
+      bytesReceived: delta.bytesReceived.current,
+      totalBytes: delta.totalBytes?.current,
+    }).catch(() => {});
+  }
+});
 
 // --- Message handler ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

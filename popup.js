@@ -3,9 +3,15 @@ const $ = id => document.getElementById(id);
 let currentVideo = null;
 let downloadCount = 0;
 let isPro = false;
-let formatMode = 'video'; // 'video' or 'audio'
+let formatMode = 'video';
 
 const QUALITY_LOCKED = [1440, 2160];
+
+// Debounce helper
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
 
 async function init() {
   const data = await chrome.storage.local.get(['downloadCount', 'lastDate']);
@@ -27,6 +33,22 @@ async function init() {
     $('urlInput').value = tab.url;
     fetchVideo(tab.url);
   }
+
+  // Listen for download progress from background
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === 'DOWNLOAD_PROGRESS') {
+      if (msg.bytesReceived && msg.totalBytes) {
+        const pct = Math.round((msg.bytesReceived / msg.totalBytes) * 100);
+        $('progressFill').style.width = pct + '%';
+        $('progressText').textContent = `Downloading... ${pct}%`;
+      } else if (msg.message) {
+        $('progressText').textContent = msg.message;
+        if (msg.state === 'complete') {
+          $('progressFill').style.width = '100%';
+        }
+      }
+    }
+  });
 }
 
 function updateProUI() {
@@ -62,7 +84,7 @@ function updateFormatUI() {
 }
 
 // Format toggle
-$('formatToggle').addEventListener('click', (e) => {
+$('formatToggle').addEventListener('click', e => {
   const btn = e.target.closest('button');
   if (!btn) return;
   $('formatToggle').querySelectorAll('button').forEach(b => b.classList.remove('active'));
@@ -86,7 +108,8 @@ $('urlInput').addEventListener('keydown', e => {
   }
 });
 
-$('urlInput').addEventListener('input', () => {
+// Debounced URL input — only fires 400ms after user stops typing
+$('urlInput').addEventListener('input', debounce(() => {
   const url = $('urlInput').value.trim();
   if (/youtube\.com\/(watch|shorts)|youtu\.be/.test(url)) fetchVideo(url);
   else {
@@ -97,7 +120,7 @@ $('urlInput').addEventListener('input', () => {
     $('emptyState').style.display = '';
     $('dlBtn').disabled = true;
   }
-});
+}, 400));
 
 $('dlBtn').addEventListener('click', startDownload);
 
@@ -108,7 +131,7 @@ if ($('closeModal')) {
   $('closeModal').addEventListener('click', () => $('upgradeModal').classList.remove('show'));
 }
 if ($('upgradeModal')) {
-  $('upgradeModal').addEventListener('click', (e) => {
+  $('upgradeModal').addEventListener('click', e => {
     if (e.target === $('upgradeModal')) $('upgradeModal').classList.remove('show');
   });
 }
@@ -205,7 +228,7 @@ async function startDownload() {
 
     $('progressFill').style.width = '100%';
     $('progressText').textContent = 'Download started!';
-    const label = formatMode === 'audio' ? 'audio' : `video`;
+    const label = formatMode === 'audio' ? 'audio' : 'video';
     showStatus(`"${currentVideo.title}" ${label} saved to Downloads`, 'success');
 
     downloadCount++;
@@ -225,7 +248,7 @@ function showStatus(msg, type) {
   el.textContent = msg;
   el.className = `status show ${type}`;
 }
-function hideStatus() { $('status').className = 'status' }
+function hideStatus() { $('status').className = 'status'; }
 
 function formatDuration(s) {
   const h = Math.floor(s / 3600);
