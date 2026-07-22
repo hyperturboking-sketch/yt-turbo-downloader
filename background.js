@@ -75,45 +75,130 @@ function sanitizeFilename(name) {
     .substring(0, 150);
 }
 
-// --- Get video data from content script (no CORS issues) ---
+// --- Fetch YouTube page and extract video data ---
+async function fetchYouTubePage(videoId) {
+  const resp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+  });
+  if (!resp.ok) throw new Error(`YouTube returned ${resp.status}`);
+  return resp.text();
+}
+
+function extractPlayerResponse(html) {
+  // Method 1: ytInitialPlayerResponse global
+  const patterns = [
+    /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/,
+    /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/,
+  ];
+  for (const pat of patterns) {
+    const match = html.match(pat);
+    if (match) {
+      try {
+        const data = JSON.parse(match[1]);
+        if (data?.streamingData) return data;
+      } catch {}
+    }
+  }
+
+  // Method 2: embedded in a script tag as JSON
+  const jsonMatch = html.match(/"videoDetails":\s*(\{[^}]+\})/);
+  if (jsonMatch) {
+    try {
+      // Try to find the full player response around this
+      const idx = html.indexOf('"streamingData"');
+      if (idx > 0) {
+        // Find the enclosing object
+        let depth = 0;
+        let start = idx;
+        while (start > 0) {
+          start--;
+          if (html[start] === '{') depth++;
+          if (html[start] === '}') depth--;
+          if (depth === 1 && html[start - 1] === '=') { start++; break; }
+          if (depth === 0 && start < idx - 10000) break;
+        }
+        const chunk = html.substring(start, idx + 5000);
+        const m2 = chunk.match(/\{[\s\S]*"streamingData"[\s\S]*?\}\s*\}/);
+        if (m2) {
+          try { return JSON.parse(m2[0]); } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
 async function getPageData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
 
-  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-
-  // Find a YouTube tab with this video
+  // First try: read from an open tab
   const tabs = await chrome.tabs.query({ url: 'https://www.youtube.com/*' });
-  let targetTab = tabs.find(t => {
-    const tid = extractVideoId(t.url);
-    return tid === videoId;
-  });
+  const targetTab = tabs.find(t => extractVideoId(t.url) === videoId);
 
-  // If no tab has this video, open it in a new tab
-  if (!targetTab) {
-    targetTab = await chrome.tabs.create({ url: watchUrl, active: false });
-    // Wait for page to load
-    await new Promise(r => setTimeout(r, 3000));
+  if (targetTab) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: targetTab.id },
+        world: 'MAIN',
+        func: () => {
+          if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
+            return ytInitialPlayerResponse;
+          }
+          return null;
+        },
+      });
+      if (results?.[0]?.result?.streamingData) {
+        return buildVideoData(results[0].result, videoId);
+      }
+    } catch {}
   }
 
-  // Try to get data directly
+  // Fallback: fetch the page HTML and parse it
   try {
-    const response = await chrome.tabs.sendMessage(targetTab.id, { type: 'GET_PAGE_DATA' });
-    if (response && !response.error) return response;
-  } catch {}
+    const html = await fetchYouTubePage(videoId);
+    const playerResponse = extractPlayerResponse(html);
+    if (playerResponse) {
+      return buildVideoData(playerResponse, videoId);
+    }
+  } catch (e) {
+    throw new Error('Failed to fetch video: ' + e.message);
+  }
 
-  // Inject content script and try again
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId: targetTab.id },
-      files: ['content.js'],
-    });
-    await new Promise(r => setTimeout(r, 1000));
-    const response = await chrome.tabs.sendMessage(targetTab.id, { type: 'GET_PAGE_DATA' });
-    if (response && !response.error) return response;
-  } catch {}
+  throw new Error('Could not load video data. Try refreshing the page.');
+}
 
-  throw new Error('Could not load video data. Try refreshing the YouTube tab.');
+function buildVideoData(response, videoId) {
+  const details = response.videoDetails || {};
+  const formats = response.streamingData?.formats || [];
+  const adaptive = response.streamingData?.adaptiveFormats || [];
+
+  return {
+    videoId,
+    title: details.title || 'Unknown',
+    duration: parseInt(details.lengthSeconds) || 0,
+    views: parseInt(details.viewCount) || 0,
+    author: details.author || '',
+    thumbnail: details.thumbnail?.thumbnails?.[0]?.url
+      || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+    formats: [...formats, ...adaptive].map(f => ({
+      itag: f.itag,
+      quality: f.qualityLabel || f.quality,
+      mimeType: f.mimeType,
+      width: f.width,
+      height: f.height,
+      bitrate: f.bitrate,
+      contentLength: f.contentLength,
+      url: f.url,
+      signatureCipher: f.signatureCipher,
+      audioQuality: f.audioQuality,
+    })),
+  };
 }
 
 // --- Format picking ---
@@ -140,7 +225,6 @@ function pickBestAudio(formats, qualityTier) {
 // --- Fetch info (for popup) ---
 async function fetchInfo(url) {
   const data = await getPageData(url);
-  // Filter to H.264 video formats for the quality list
   const h264Only = (data.formats || []).filter(f =>
     f.mimeType?.includes('avc1') && f.mimeType?.startsWith('video/')
   ).sort((a, b) => (b.height || 0) - (a.height || 0));
@@ -162,7 +246,7 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
   // --- AUDIO ONLY ---
   if (format === 'audio') {
     const bestAudio = pickBestAudio(all, audioQuality);
-    if (!bestAudio?.url) throw new Error('No audio format found. Try refreshing the YouTube page.');
+    if (!bestAudio?.url) throw new Error('No audio format found.');
     const ext = bestAudio.mimeType?.includes('webm') ? 'webm' : 'm4a';
     filename = `${filename}.${ext}`;
     await chrome.downloads.download({ url: bestAudio.url, filename, saveAs: false });
@@ -170,7 +254,6 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
   }
 
   // --- VIDEO ---
-  // Try combined format first (has audio+video)
   const bestCombined = combined
     .filter(f => f.height && f.height <= maxH)
     .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
@@ -182,7 +265,6 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
     return { success: true, filename };
   }
 
-  // Adaptive video only
   const bestVideo = pickFormat(adaptive.length ? adaptive : all, maxH);
   if (bestVideo?.url) {
     const ext = bestVideo.mimeType?.includes('webm') ? 'webm' : 'mp4';
@@ -191,7 +273,7 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
     return { success: true, filename, note: 'Video only (no audio)' };
   }
 
-  throw new Error('No downloadable format found. Try refreshing the YouTube page.');
+  throw new Error('No downloadable format found.');
 }
 
 // --- Message handler ---
@@ -202,32 +284,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch(e => sendResponse({ error: e.message }));
     return true;
   }
-
   if (msg.type === 'DOWNLOAD') {
     downloadVideo(msg.url, msg.quality, msg.title, msg.format, msg.audioQuality)
       .then(data => sendResponse(data))
       .catch(e => sendResponse({ error: e.message }));
     return true;
   }
-
   if (msg.type === 'GET_PRO_STATUS') {
-    getProStatus()
-      .then(data => sendResponse(data))
-      .catch(e => sendResponse({ error: e.message }));
+    getProStatus().then(d => sendResponse(d)).catch(e => sendResponse({ error: e.message }));
     return true;
   }
-
   if (msg.type === 'ACTIVATE_LICENSE') {
-    activateLicense(msg.key)
-      .then(data => sendResponse(data))
-      .catch(e => sendResponse({ error: e.message }));
+    activateLicense(msg.key).then(d => sendResponse(d)).catch(e => sendResponse({ error: e.message }));
     return true;
   }
-
   if (msg.type === 'DEACTIVATE_LICENSE') {
-    deactivateLicense()
-      .then(data => sendResponse(data))
-      .catch(e => sendResponse({ error: e.message }));
+    deactivateLicense().then(d => sendResponse(d)).catch(e => sendResponse({ error: e.message }));
     return true;
   }
 });
