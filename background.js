@@ -1,3 +1,9 @@
+// --- Keep service worker alive ---
+chrome.alarms.create('keepalive', { periodInMinutes: 0.4 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'keepalive') {}
+});
+
 // --- Pro License System ---
 const FREE_MAX_QUALITY = 1080;
 
@@ -23,12 +29,10 @@ async function validateKeyWithServer(key) {
   if (key.startsWith('YTT-DEMO01-')) return true;
   try {
     const resp = await fetch('https://your-license-server.com/api/validate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key, machineId: await getMachineId() }),
     });
-    const data = await resp.json();
-    return data.valid === true;
+    return (await resp.json()).valid === true;
   } catch { return false; }
 }
 
@@ -48,10 +52,7 @@ function extractVideoId(url) {
     /(?:shorts\/)([a-zA-Z0-9_-]{11})/,
     /^([a-zA-Z0-9_-]{11})$/,
   ];
-  for (const pat of patterns) {
-    const m = url.match(pat);
-    if (m) return m[1];
-  }
+  for (const pat of patterns) { const m = url.match(pat); if (m) return m[1]; }
   return null;
 }
 
@@ -59,63 +60,91 @@ function sanitizeFilename(name) {
   return (name || 'video').replace(/[<>:"/\\|?*\n\r]/g, '_').replace(/\s+/g, ' ').trim().substring(0, 150);
 }
 
-// --- Get video data from YouTube tab ---
+// --- Innertube API (multiple clients) ---
+const CLIENTS = [
+  { clientName: 'MWEB', clientVersion: '2.20250722.07.00', hl: 'en', gl: 'US' },
+  { clientName: 'WEB', clientVersion: '2.20250722.07.00', hl: 'en', gl: 'US' },
+  { clientName: 'ANDROID', clientVersion: '19.29.37', hl: 'en', gl: 'US', androidSdkVersion: 34, osName: 'Android', osVersion: '14', platform: 'MOBILE' },
+];
+
+const CLIENT_IDS = { MWEB: 2, WEB: 1, ANDROID: 3 };
+
+async function innertubePlayer(videoId) {
+  for (const client of CLIENTS) {
+    try {
+      const body = {
+        context: { client },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true,
+      };
+
+      const resp = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Youtube-Client-Name': String(CLIENT_IDS[client.clientName] || 1),
+          'X-Youtube-Client-Version': client.clientVersion,
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+          'Origin': 'https://www.youtube.com',
+          'Referer': 'https://www.youtube.com/',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      if (data.streamingData?.formats?.length || data.streamingData?.adaptiveFormats?.length) {
+        return data;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// --- Get video data: try open tab first, then API ---
 async function getPageData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
 
-  // Find the exact tab with this video
+  // Method 1: Read from open YouTube tab via executeScript
   const tabs = await chrome.tabs.query({ url: '*://www.youtube.com/*' });
-  let targetTab = null;
   for (const tab of tabs) {
-    const tid = extractVideoId(tab.url);
-    if (tid === videoId) { targetTab = tab; break; }
-  }
-
-  if (!targetTab) {
-    throw new Error('Navigate to this video on YouTube first, then try again.');
-  }
-
-  // Try executeScript in MAIN world (bypasses CSP and isolated world)
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: targetTab.id },
-      world: 'MAIN',
-      func: (vid) => {
-        try {
-          // Direct global check
-          if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
-            const vd = ytInitialPlayerResponse.videoDetails;
-            if (vd && vd.videoId === vid) return ytInitialPlayerResponse;
-          }
-          // SPA player API
-          const p = document.querySelector('#movie_player');
-          if (p && typeof p.getPlayerResponse === 'function') {
-            const resp = p.getPlayerResponse();
-            if (resp?.streamingData) {
-              const vd = resp.videoDetails;
-              if (vd && vd.videoId === vid) return resp;
+    if (extractVideoId(tab.url) !== videoId) continue;
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: () => {
+          try {
+            if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
+              return JSON.parse(JSON.stringify(ytInitialPlayerResponse));
             }
-          }
-          return null;
-        } catch (e) { return null; }
-      },
-      args: [videoId],
-    });
+            const p = document.querySelector('#movie_player');
+            if (p?.getPlayerResponse) return JSON.parse(JSON.stringify(p.getPlayerResponse()));
+            return null;
+          } catch { return null; }
+        },
+      });
+      const result = results?.[0]?.result;
+      if (result?.streamingData && result?.videoDetails?.videoId === videoId) {
+        return buildVideoData(result, videoId);
+      }
+    } catch {}
+    break;
+  }
 
-    if (results?.[0]?.result?.streamingData) {
-      return buildVideoData(results[0].result, videoId);
-    }
-  } catch {}
+  // Method 2: Innertube API
+  const data = await innertubePlayer(videoId);
+  if (data) return buildVideoData(data, videoId);
 
-  throw new Error('Could not read video data. Refresh the YouTube tab and try again.');
+  throw new Error('Could not load video data. Make sure the video is open in a YouTube tab.');
 }
 
 function buildVideoData(response, videoId) {
   const details = response.videoDetails || {};
   const formats = response.streamingData?.formats || [];
   const adaptive = response.streamingData?.adaptiveFormats || [];
-
   return {
     videoId: details.videoId || videoId,
     title: details.title || 'Unknown',
@@ -141,32 +170,27 @@ function buildVideoData(response, videoId) {
 
 // --- Format picking ---
 function pickFormat(formats, maxH) {
-  const videoFormats = formats.filter(f => f.mimeType?.startsWith('video/') && f.url);
-  const sorted = videoFormats
-    .filter(f => !maxH || (f.height && f.height <= maxH))
+  const vf = formats.filter(f => f.mimeType?.startsWith('video/') && f.url);
+  const sorted = vf.filter(f => !maxH || (f.height && f.height <= maxH))
     .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bitrate || 0) - (a.bitrate || 0));
-  const h264 = sorted.find(f => f.mimeType?.includes('avc1'));
-  return h264 || sorted[0];
+  return sorted.find(f => f.mimeType?.includes('avc1')) || sorted[0];
 }
 
 function pickBestAudio(formats, qualityTier) {
-  const audioFormats = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url);
-  if (!audioFormats.length) return null;
-  const m4a = audioFormats.filter(f => f.mimeType?.includes('mp4') || f.mimeType?.includes('audio/mp4'));
-  const webm = audioFormats.filter(f => f.mimeType?.includes('webm'));
-  const pool = m4a.length ? m4a : webm;
-  pool.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-  const maxBitrate = { high: 999999, medium: 192000, low: 96000 }[qualityTier] || 192000;
-  return pool.find(f => (f.bitrate || 0) <= maxBitrate) || pool[pool.length - 1];
+  const af = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url);
+  if (!af.length) return null;
+  const pool = af.filter(f => f.mimeType?.includes('mp4') || f.mimeType?.includes('audio/mp4'));
+  if (!pool.length) af.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  const sorted = pool.length ? pool.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0)) : af;
+  const max = { high: 999999, medium: 192000, low: 96000 }[qualityTier] || 192000;
+  return sorted.find(f => (f.bitrate || 0) <= max) || sorted[sorted.length - 1];
 }
 
-// --- Fetch info (for popup) ---
+// --- Fetch info ---
 async function fetchInfo(url) {
   const data = await getPageData(url);
-  const h264Only = (data.formats || []).filter(f =>
-    f.mimeType?.includes('avc1') && f.mimeType?.startsWith('video/') && f.url
-  ).sort((a, b) => (b.height || 0) - (a.height || 0));
-  return { ...data, formats: h264Only };
+  return { ...data, formats: (data.formats || []).filter(f => f.mimeType?.includes('avc1') && f.url)
+    .sort((a, b) => (b.height || 0) - (a.height || 0)) };
 }
 
 // --- Download ---
@@ -177,43 +201,34 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
 
   const data = await getPageData(url);
   const all = data.formats || [];
-  const combined = all.filter(f => f.url && f.audioQuality);
-  const adaptive = all.filter(f => f.url && !f.audioQuality);
   let filename = sanitizeFilename(title || data.title || 'video');
 
-  // --- AUDIO ONLY ---
   if (format === 'audio') {
-    const bestAudio = pickBestAudio(all, audioQuality);
-    if (!bestAudio?.url) throw new Error('No audio format found.');
-    const ext = bestAudio.mimeType?.includes('webm') ? 'webm' : 'm4a';
-    filename = `${filename}.${ext}`;
-    await chrome.downloads.download({ url: bestAudio.url, filename, saveAs: false });
+    const best = pickBestAudio(all, audioQuality);
+    if (!best?.url) throw new Error('No audio format found.');
+    filename = `${filename}.${best.mimeType?.includes('webm') ? 'webm' : 'm4a'}`;
+    await chrome.downloads.download({ url: best.url, filename, saveAs: false });
     return { success: true, filename };
   }
 
-  // --- VIDEO ---
-  // Try combined (video+audio) first
-  const bestCombined = combined
-    .filter(f => f.height && f.height <= maxH)
+  // Combined (has audio)
+  const combined = all.filter(f => f.url && f.audioQuality && f.height && f.height <= maxH)
     .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-
-  if (bestCombined?.url) {
-    const ext = bestCombined.mimeType?.includes('webm') ? 'webm' : 'mp4';
-    filename = `${filename}.${ext}`;
-    await chrome.downloads.download({ url: bestCombined.url, filename, saveAs: false });
+  if (combined?.url) {
+    filename = `${filename}.${combined.mimeType?.includes('webm') ? 'webm' : 'mp4'}`;
+    await chrome.downloads.download({ url: combined.url, filename, saveAs: false });
     return { success: true, filename };
   }
 
-  // Adaptive video only
-  const bestVideo = pickFormat(adaptive.length ? adaptive : all, maxH);
-  if (bestVideo?.url) {
-    const ext = bestVideo.mimeType?.includes('webm') ? 'webm' : 'mp4';
-    filename = `${filename}.${ext}`;
-    await chrome.downloads.download({ url: bestVideo.url, filename, saveAs: false });
+  // Video only
+  const best = pickFormat(all, maxH);
+  if (best?.url) {
+    filename = `${filename}.${best.mimeType?.includes('webm') ? 'webm' : 'mp4'}`;
+    await chrome.downloads.download({ url: best.url, filename, saveAs: false });
     return { success: true, filename, note: 'Video only (no audio)' };
   }
 
-  throw new Error('No downloadable format found. YouTube may require sign-in for this video.');
+  throw new Error('No downloadable format found.');
 }
 
 // --- Message handler ---
