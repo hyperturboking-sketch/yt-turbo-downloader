@@ -1,98 +1,83 @@
-// Content script - runs on youtube.com, has same-origin access
+// Content script - runs on youtube.com
 
-// Make Innertube API call from within the YouTube page (has cookies/session)
-async function fetchPlayerFromPage(videoId) {
-  // Get ytcfg for API key and client info
-  let apiKey = '';
-  let clientName = 'WEB';
-  let clientVersion = '2.20250722.07.00';
-
+// Get video data via multiple methods
+async function getVideoData(videoId) {
+  // Method 1: fetch player API from page context (same-origin, has cookies)
   try {
-    if (typeof ytcfg !== 'undefined') {
-      apiKey = ytcfg.get('INNERTUBE_API_KEY') || '';
-      clientName = ytcfg.get('INNERTUBE_CLIENT_NAME') || 'WEB';
-      clientVersion = ytcfg.get('INNERTUBE_CLIENT_VERSION') || clientVersion;
+    const resp = await fetch('/youtubei/v1/player?prettyPrint=false', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        context: { client: { clientName: 'WEB', clientVersion: '2.20250722.07.00', hl: 'en', gl: 'US' } },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true,
+      }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.streamingData?.formats?.length || data.streamingData?.adaptiveFormats?.length) {
+        return buildResponse(data, videoId);
+      }
     }
   } catch {}
 
-  const resp = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      context: { client: { clientName, clientVersion, hl: 'en', gl: 'US' } },
-      videoId,
-      contentCheckOk: true,
-      racyCheckOk: true,
-    }),
-  });
+  // Method 2: try ytInitialPlayerResponse via script injection
+  try {
+    const resp = await fetch('/watch?v=' + videoId);
+    const html = await resp.text();
+    const match = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;\s*var\s+meta/);
+    if (match) {
+      const data = JSON.parse(match[1]);
+      if (data.streamingData) return buildResponse(data, videoId);
+    }
+    // Fallback regex
+    const match2 = html.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]+?"streamingData"[\s\S]+?\});/);
+    if (match2) {
+      const data = JSON.parse(match2[1]);
+      if (data.streamingData) return buildResponse(data, videoId);
+    }
+  } catch {}
 
-  if (!resp.ok) return null;
-  const data = await resp.json();
-  if (data.streamingData?.formats?.length || data.streamingData?.adaptiveFormats?.length) {
-    return data;
-  }
   return null;
+}
+
+function buildResponse(data, videoId) {
+  const details = data.videoDetails || {};
+  const formats = data.streamingData?.formats || [];
+  const adaptive = data.streamingData?.adaptiveFormats || [];
+  return {
+    videoId: details.videoId || videoId,
+    title: details.title || document.title.replace(' - YouTube', '').trim(),
+    duration: parseInt(details.lengthSeconds) || 0,
+    views: parseInt(details.viewCount) || 0,
+    author: details.author || '',
+    thumbnail: details.thumbnail?.thumbnails?.[0]?.url || '',
+    url: 'https://www.youtube.com/watch?v=' + (details.videoId || videoId),
+    formats: [...formats, ...adaptive].map(f => ({
+      itag: f.itag,
+      quality: f.qualityLabel || f.quality,
+      mimeType: f.mimeType,
+      width: f.width,
+      height: f.height,
+      bitrate: f.bitrate,
+      contentLength: f.contentLength,
+      url: f.url || null,
+      signatureCipher: f.signatureCipher || null,
+      audioQuality: f.audioQuality,
+    })),
+  };
 }
 
 // Handle messages from background
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_PAGE_DATA') {
-    (async () => {
-      const videoId = msg.videoId;
-      if (!videoId) { sendResponse({ error: 'No video ID' }); return; }
-
-      // Method 1: Try ytInitialPlayerResponse (has URLs or cipher)
-      let data = null;
-      try {
-        if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
-          data = ytInitialPlayerResponse;
-        }
-      } catch {}
-
-      // Method 2: Fetch from Innertube API with page cookies (best chance of direct URLs)
-      if (!data?.streamingData) {
-        try { data = await fetchPlayerFromPage(videoId); } catch {}
-      }
-
-      // Method 3: Player API
-      if (!data?.streamingData) {
-        try {
-          const p = document.querySelector('#movie_player');
-          if (p?.getPlayerResponse) data = p.getPlayerResponse();
-        } catch {}
-      }
-
-      if (!data?.streamingData) {
-        sendResponse({ error: 'No video data found. Refresh the page.' });
-        return;
-      }
-
-      const details = data.videoDetails || {};
-      const formats = data.streamingData?.formats || [];
-      const adaptive = data.streamingData?.adaptiveFormats || [];
-
-      sendResponse({
-        videoId: details.videoId || videoId,
-        title: details.title || document.title.replace(' - YouTube', '').trim(),
-        duration: parseInt(details.lengthSeconds) || 0,
-        views: parseInt(details.viewCount) || 0,
-        author: details.author || '',
-        thumbnail: details.thumbnail?.thumbnails?.[0]?.url || '',
-        url: 'https://www.youtube.com/watch?v=' + (details.videoId || videoId),
-        formats: [...formats, ...adaptive].map(f => ({
-          itag: f.itag,
-          quality: f.qualityLabel || f.quality,
-          mimeType: f.mimeType,
-          width: f.width,
-          height: f.height,
-          bitrate: f.bitrate,
-          contentLength: f.contentLength,
-          url: f.url || null,
-          signatureCipher: f.signatureCipher || null,
-          audioQuality: f.audioQuality,
-        })),
-      });
-    })();
+    getVideoData(msg.videoId).then(data => {
+      if (data) sendResponse(data);
+      else sendResponse({ error: 'No video data found. Refresh the page.' });
+    }).catch(() => {
+      sendResponse({ error: 'Failed to get video data.' });
+    });
     return true;
   }
 });
@@ -105,14 +90,7 @@ function addDownloadButton() {
 
   const btn = document.createElement('button');
   btn.id = 'yt-turbo-btn';
-  btn.innerHTML = `
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-      <polyline points="7 10 12 15 17 10"/>
-      <line x1="12" y1="15" x2="12" y2="3"/>
-    </svg>
-    <span>Download</span>
-  `;
+  btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>Download</span>';
   btn.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -126,11 +104,8 @@ function addDownloadButton() {
   });
 
   const firstBtn = actions.querySelector('ytd-button-renderer, button, #share-button, #like-button');
-  if (firstBtn) {
-    firstBtn.parentNode.insertBefore(btn, firstBtn);
-  } else {
-    actions.appendChild(btn);
-  }
+  if (firstBtn) firstBtn.parentNode.insertBefore(btn, firstBtn);
+  else actions.appendChild(btn);
 }
 
 let lastUrl = '';
