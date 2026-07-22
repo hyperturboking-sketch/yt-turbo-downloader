@@ -80,35 +80,40 @@ async function getPageData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
 
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
   // Find a YouTube tab with this video
   const tabs = await chrome.tabs.query({ url: 'https://www.youtube.com/*' });
-  const targetTab = tabs.find(t => {
+  let targetTab = tabs.find(t => {
     const tid = extractVideoId(t.url);
     return tid === videoId;
   });
 
-  if (targetTab) {
-    try {
-      const response = await chrome.tabs.sendMessage(targetTab.id, { type: 'GET_PAGE_DATA' });
-      if (response && !response.error) return response;
-    } catch {}
+  // If no tab has this video, open it in a new tab
+  if (!targetTab) {
+    targetTab = await chrome.tabs.create({ url: watchUrl, active: false });
+    // Wait for page to load
+    await new Promise(r => setTimeout(r, 3000));
   }
 
-  // Fallback: inject content script into a matching tab and try again
-  if (targetTab) {
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: targetTab.id },
-        files: ['content.js'],
-      });
-      // Wait for script to load
-      await new Promise(r => setTimeout(r, 500));
-      const response = await chrome.tabs.sendMessage(targetTab.id, { type: 'GET_PAGE_DATA' });
-      if (response && !response.error) return response;
-    } catch {}
-  }
+  // Try to get data directly
+  try {
+    const response = await chrome.tabs.sendMessage(targetTab.id, { type: 'GET_PAGE_DATA' });
+    if (response && !response.error) return response;
+  } catch {}
 
-  throw new Error('Open this video in a YouTube tab first, then try again.');
+  // Inject content script and try again
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: targetTab.id },
+      files: ['content.js'],
+    });
+    await new Promise(r => setTimeout(r, 1000));
+    const response = await chrome.tabs.sendMessage(targetTab.id, { type: 'GET_PAGE_DATA' });
+    if (response && !response.error) return response;
+  } catch {}
+
+  throw new Error('Could not load video data. Try refreshing the YouTube tab.');
 }
 
 // --- Format picking ---

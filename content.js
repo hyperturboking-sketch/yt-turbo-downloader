@@ -1,76 +1,77 @@
-// Content script - runs on YouTube pages, has access to page JS context
+// Content script - bridges between YouTube page and extension
 
-function getPlayerResponse() {
-  // YouTube embeds video data in these globals
-  if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
-    return ytInitialPlayerResponse;
-  }
-  // SPA navigation - check for player API
-  const player = document.querySelector('#movie_player');
-  if (player?.getPlayerResponse) {
-    return player.getPlayerResponse();
-  }
-  // Try from page source
-  const scripts = document.querySelectorAll('script');
-  for (const s of scripts) {
-    const text = s.textContent;
-    if (text.includes('ytInitialPlayerResponse')) {
-      const match = text.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-      if (match) {
-        try { return JSON.parse(match[1]); } catch {}
-      }
-    }
-  }
-  return null;
-}
-
-function extractVideoData(response) {
-  if (!response) return null;
-  const details = response.videoDetails || {};
-  const formats = response.streamingData?.formats || [];
-  const adaptive = response.streamingData?.adaptiveFormats || [];
-  const all = [...formats, ...adaptive];
-
-  const videoId = details.videoId || '';
-
-  return {
-    videoId,
-    title: details.title || document.title.replace(' - YouTube', '').trim(),
-    duration: parseInt(details.lengthSeconds) || 0,
-    views: parseInt(details.viewCount) || 0,
-    author: details.author || '',
-    thumbnail: details.thumbnail?.thumbnails?.[0]?.url
-      || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-    url: `https://www.youtube.com/watch?v=${videoId}`,
-    formats: all.map(f => ({
-      itag: f.itag,
-      quality: f.qualityLabel || f.quality,
-      mimeType: f.mimeType,
-      width: f.width,
-      height: f.height,
-      bitrate: f.bitrate,
-      contentLength: f.contentLength,
-      url: f.url,
-      signatureCipher: f.signatureCipher,
-      audioQuality: f.audioQuality,
-    })),
-  };
-}
-
-// Listen for messages from popup/background
+// Listen for requests from background/popup
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_PAGE_DATA') {
-    const response = getPlayerResponse();
-    const data = extractVideoData(response);
-    sendResponse(data || { error: 'Could not extract video data. Try refreshing the page.' });
-    return true;
+    // Inject a script into the PAGE's main world to read ytInitialPlayerResponse
+    const script = document.createElement('script');
+    script.textContent = `
+      (function() {
+        try {
+          let data = null;
+          if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
+            data = ytInitialPlayerResponse;
+          }
+          const el = document.getElementById('__yt_turbo_data__');
+          if (el) el.textContent = JSON.stringify(data);
+          window.postMessage({ type: '__YT_TURBO_DATA__', data: data }, '*');
+        } catch(e) {
+          window.postMessage({ type: '__YT_TURBO_DATA__', data: null }, '*');
+        }
+      })();
+    `;
+    document.documentElement.appendChild(script);
+    script.remove();
+
+    // Listen for the response from the page script
+    function handler(e) {
+      if (e.data?.type === '__YT_TURBO_DATA__') {
+        window.removeEventListener('message', handler);
+        const resp = e.data.data;
+        if (resp) {
+          const details = resp.videoDetails || {};
+          const formats = resp.streamingData?.formats || [];
+          const adaptive = resp.streamingData?.adaptiveFormats || [];
+          sendResponse({
+            videoId: details.videoId || '',
+            title: details.title || document.title.replace(' - YouTube', '').trim(),
+            duration: parseInt(details.lengthSeconds) || 0,
+            views: parseInt(details.viewCount) || 0,
+            author: details.author || '',
+            thumbnail: details.thumbnail?.thumbnails?.[0]?.url || '',
+            url: 'https://www.youtube.com/watch?v=' + (details.videoId || ''),
+            formats: [...formats, ...adaptive].map(f => ({
+              itag: f.itag,
+              quality: f.qualityLabel || f.quality,
+              mimeType: f.mimeType,
+              width: f.width,
+              height: f.height,
+              bitrate: f.bitrate,
+              contentLength: f.contentLength,
+              url: f.url,
+              signatureCipher: f.signatureCipher,
+              audioQuality: f.audioQuality,
+            })),
+          });
+        } else {
+          sendResponse({ error: 'Could not extract video data. Try refreshing the page.' });
+        }
+      }
+    }
+    window.addEventListener('message', handler);
+    // Timeout after 3s
+    setTimeout(() => {
+      window.removeEventListener('message', handler);
+      sendResponse({ error: 'Timeout reading video data. Try refreshing the page.' });
+    }, 3000);
+
+    return true; // async response
   }
 });
 
 // In-page download button
 function addDownloadButton() {
   if (document.getElementById('yt-turbo-btn')) return;
-
   const actions = document.querySelector('#above-the-fold #menu-container, ytd-watch-metadata #actions, #actions ytd-menu-renderer');
   if (!actions) return;
 
@@ -87,19 +88,13 @@ function addDownloadButton() {
   btn.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const response = getPlayerResponse();
-    const data = extractVideoData(response);
-    if (data?.formats?.length) {
-      // Find best combined format
-      const combined = data.formats.filter(f => f.url && f.audioQuality);
-      const best = combined.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-      if (best?.url) {
-        const a = document.createElement('a');
-        a.href = best.url;
-        a.download = (data.title || 'video') + '.mp4';
-        a.click();
-      }
-    }
+    chrome.runtime.sendMessage({
+      type: 'DOWNLOAD',
+      url: window.location.href,
+      quality: '1080',
+      format: 'video',
+      title: document.title.replace(' - YouTube', '').trim(),
+    });
   });
 
   const firstBtn = actions.querySelector('ytd-button-renderer, button, #share-button, #like-button');
