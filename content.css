@@ -1,31 +1,34 @@
 #yt-turbo-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
+  gap: 7px;
+  padding: 8px 18px;
   margin: 0 4px;
-  background: linear-gradient(135deg, #ff4444, #cc0000);
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
   color: #fff;
   border: none;
-  border-radius: 20px;
-  font-size: 14px;
+  border-radius: 24px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
-  font-family: 'Roboto', Arial, sans-serif;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  font-family: 'Roboto', 'Inter', Arial, sans-serif;
   vertical-align: middle;
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.25);
+  letter-spacing: 0.2px;
 }
 
 #yt-turbo-btn:hover {
-  transform: scale(1.05);
-  box-shadow: 0 2px 12px rgba(255, 68, 68, 0.4);
+  transform: translateY(-1px) scale(1.02);
+  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.4);
 }
 
 #yt-turbo-btn:active {
-  transform: scale(0.98);
+  transform: translateY(0) scale(0.98);
 }
 
 #yt-turbo-btn svg {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
 }
