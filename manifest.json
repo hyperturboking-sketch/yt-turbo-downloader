@@ -3,7 +3,7 @@
   "name": "YT Turbo Downloader",
   "version": "1.0.0",
   "description": "Download YouTube videos in one click - up to 4K quality",
-  "permissions": ["downloads", "activeTab", "storage"],
+  "permissions": ["downloads", "activeTab", "storage", "scripting"],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
