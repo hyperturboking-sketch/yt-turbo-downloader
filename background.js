@@ -109,14 +109,14 @@ async function getPageData(url) {
 
 // --- Format picking ---
 function pickFormat(formats, maxH) {
-  const vf = formats.filter(f => f.mimeType?.startsWith('video/') && f.url);
+  const vf = formats.filter(f => f.mimeType?.startsWith('video/') && f.url && f.url.includes('googlevideo.com'));
   const sorted = vf.filter(f => !maxH || (f.height && f.height <= maxH))
     .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bitrate || 0) - (a.bitrate || 0));
   return sorted.find(f => f.mimeType?.includes('avc1')) || sorted[0];
 }
 
 function pickBestAudio(formats, qualityTier) {
-  const af = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url);
+  const af = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url && f.url.includes('googlevideo.com'));
   if (!af.length) return null;
   const m4a = af.filter(f => f.mimeType?.includes('mp4') || f.mimeType?.includes('audio/mp4'));
   const sorted = m4a.length ? m4a : af;
@@ -128,11 +128,18 @@ function pickBestAudio(formats, qualityTier) {
 // --- Fetch info ---
 async function fetchInfo(url) {
   const data = await getPageData(url);
-  return { ...data, formats: (data.formats || []).filter(f => f.mimeType?.includes('avc1') && f.url)
-    .sort((a, b) => (b.height || 0) - (a.height || 0)) };
+  return { ...data, formats: (data.formats || []).filter(f =>
+    f.mimeType?.includes('avc1') && f.url && f.url.includes('googlevideo.com')
+  ).sort((a, b) => (b.height || 0) - (a.height || 0)) };
 }
 
 // --- Download ---
+function isValidStreamUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  // Must be from YouTube's video CDN
+  return url.includes('googlevideo.com') || url.includes('videoplayback');
+}
+
 async function downloadVideo(url, quality, title, format = 'video', audioQuality = 'medium') {
   const { isPro } = await getProStatus();
   let maxH = parseInt(quality) || 1080;
@@ -144,14 +151,14 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
 
   if (format === 'audio') {
     const best = pickBestAudio(all, audioQuality);
-    if (!best?.url) throw new Error('No audio format found.');
+    if (!best?.url || !isValidStreamUrl(best.url)) throw new Error('No valid audio stream found.');
     filename = `${filename}.${best.mimeType?.includes('webm') ? 'webm' : 'm4a'}`;
     await chrome.downloads.download({ url: best.url, filename, saveAs: false });
     return { success: true, filename };
   }
 
   // Combined (has audio)
-  const combined = all.filter(f => f.url && f.audioQuality && f.height && f.height <= maxH)
+  const combined = all.filter(f => isValidStreamUrl(f.url) && f.audioQuality && f.height && f.height <= maxH)
     .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
   if (combined?.url) {
     filename = `${filename}.${combined.mimeType?.includes('webm') ? 'webm' : 'mp4'}`;
@@ -161,13 +168,13 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
 
   // Video only
   const best = pickFormat(all, maxH);
-  if (best?.url) {
+  if (best?.url && isValidStreamUrl(best.url)) {
     filename = `${filename}.${best.mimeType?.includes('webm') ? 'webm' : 'mp4'}`;
     await chrome.downloads.download({ url: best.url, filename, saveAs: false });
     return { success: true, filename, note: 'Video only (no audio)' };
   }
 
-  throw new Error('No downloadable format found. YouTube may require sign-in for this video.');
+  throw new Error('No valid download stream found. The video may require sign-in.');
 }
 
 // --- Message handler ---

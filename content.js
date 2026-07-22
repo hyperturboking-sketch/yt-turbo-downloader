@@ -1,8 +1,10 @@
 // Content script - runs on youtube.com
 
-// Get video data via multiple methods
 async function getVideoData(videoId) {
-  // Method 1: fetch player API from page context (same-origin, has cookies)
+  // Must be on youtube.com
+  if (!location.hostname.includes('youtube.com')) return null;
+
+  // Method 1: fetch player API from same-origin page (has cookies)
   try {
     const resp = await fetch('/youtubei/v1/player?prettyPrint=false', {
       method: 'POST',
@@ -14,28 +16,39 @@ async function getVideoData(videoId) {
         racyCheckOk: true,
       }),
     });
-    if (resp.ok) {
+    // Must be JSON, not HTML
+    const ct = resp.headers.get('content-type') || '';
+    if (resp.ok && ct.includes('json')) {
       const data = await resp.json();
-      if (data.streamingData?.formats?.length || data.streamingData?.adaptiveFormats?.length) {
-        return buildResponse(data, videoId);
+      // Must have streamingData with actual URLs
+      const fmts = [...(data.streamingData?.formats || []), ...(data.streamingData?.adaptiveFormats || [])];
+      const hasUrls = fmts.some(f => f.url);
+      if (hasUrls) return buildResponse(data, videoId);
+    }
+  } catch {}
+
+  // Method 2: read ytInitialPlayerResponse from the page
+  try {
+    const scripts = document.querySelectorAll('script');
+    for (const s of scripts) {
+      const t = s.textContent;
+      if (t.includes('ytInitialPlayerResponse')) {
+        const m = t.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]*?"streamingData"[\s\S]*?\});/);
+        if (m) {
+          const data = JSON.parse(m[1]);
+          const fmts = [...(data.streamingData?.formats || []), ...(data.streamingData?.adaptiveFormats || [])];
+          if (fmts.some(f => f.url)) return buildResponse(data, videoId);
+        }
       }
     }
   } catch {}
 
-  // Method 2: try ytInitialPlayerResponse via script injection
+  // Method 3: check global variable
   try {
-    const resp = await fetch('/watch?v=' + videoId);
-    const html = await resp.text();
-    const match = html.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;\s*var\s+meta/);
-    if (match) {
-      const data = JSON.parse(match[1]);
-      if (data.streamingData) return buildResponse(data, videoId);
-    }
-    // Fallback regex
-    const match2 = html.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]+?"streamingData"[\s\S]+?\});/);
-    if (match2) {
-      const data = JSON.parse(match2[1]);
-      if (data.streamingData) return buildResponse(data, videoId);
+    if (window.ytInitialPlayerResponse?.streamingData) {
+      const data = window.ytInitialPlayerResponse;
+      const fmts = [...(data.streamingData?.formats || []), ...(data.streamingData?.adaptiveFormats || [])];
+      if (fmts.some(f => f.url)) return buildResponse(data, videoId);
     }
   } catch {}
 
@@ -48,7 +61,7 @@ function buildResponse(data, videoId) {
   const adaptive = data.streamingData?.adaptiveFormats || [];
   return {
     videoId: details.videoId || videoId,
-    title: details.title || document.title.replace(' - YouTube', '').trim(),
+    title: details.title || 'Unknown',
     duration: parseInt(details.lengthSeconds) || 0,
     views: parseInt(details.viewCount) || 0,
     author: details.author || '',
@@ -73,8 +86,8 @@ function buildResponse(data, videoId) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_PAGE_DATA') {
     getVideoData(msg.videoId).then(data => {
-      if (data) sendResponse(data);
-      else sendResponse({ error: 'No video data found. Refresh the page.' });
+      if (data?.formats?.length) sendResponse(data);
+      else sendResponse({ error: 'No downloadable formats found. The video may require sign-in.' });
     }).catch(() => {
       sendResponse({ error: 'Failed to get video data.' });
     });
