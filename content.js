@@ -1,59 +1,84 @@
-// Content script - runs on youtube.com pages
+// Content script - runs on youtube.com, has same-origin access
 
-// Inject page-context script to read player data
-function getPlayerResponse() {
-  return new Promise((resolve) => {
-    const id = '__yt_turbo_' + Date.now();
+// Make Innertube API call from within the YouTube page (has cookies/session)
+async function fetchPlayerFromPage(videoId) {
+  // Get ytcfg for API key and client info
+  let apiKey = '';
+  let clientName = 'WEB';
+  let clientVersion = '2.20250722.07.00';
 
-    // Listen for response
-    function onMsg(e) {
-      if (e.data?.id === id) {
-        window.removeEventListener('message', onMsg);
-        resolve(e.data.result);
-      }
+  try {
+    if (typeof ytcfg !== 'undefined') {
+      apiKey = ytcfg.get('INNERTUBE_API_KEY') || '';
+      clientName = ytcfg.get('INNERTUBE_CLIENT_NAME') || 'WEB';
+      clientVersion = ytcfg.get('INNERTUBE_CLIENT_VERSION') || clientVersion;
     }
-    window.addEventListener('message', onMsg);
+  } catch {}
 
-    // Inject script into page world via DOM
-    const s = document.createElement('script');
-    s.textContent = `window.postMessage({id:"${id}",result:(function(){
-      try {
-        if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
-          return ytInitialPlayerResponse;
-        }
-        // Try from player API
-        const p = document.querySelector('#movie_player');
-        if (p && p.getPlayerResponse) return p.getPlayerResponse();
-        return null;
-      } catch(e) { return null; }
-    })()})`;
-    (document.head || document.documentElement).appendChild(s);
-    s.remove();
-
-    // Timeout
-    setTimeout(() => { window.removeEventListener('message', onMsg); resolve(null); }, 2000);
+  const resp = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      context: { client: { clientName, clientVersion, hl: 'en', gl: 'US' } },
+      videoId,
+      contentCheckOk: true,
+      racyCheckOk: true,
+    }),
   });
+
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  if (data.streamingData?.formats?.length || data.streamingData?.adaptiveFormats?.length) {
+    return data;
+  }
+  return null;
 }
 
 // Handle messages from background
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_PAGE_DATA') {
-    getPlayerResponse().then(resp => {
-      if (!resp?.streamingData) {
-        sendResponse({ error: 'No video data found. Refresh the page and try again.' });
+    (async () => {
+      const videoId = msg.videoId;
+      if (!videoId) { sendResponse({ error: 'No video ID' }); return; }
+
+      // Method 1: Try ytInitialPlayerResponse (has URLs or cipher)
+      let data = null;
+      try {
+        if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
+          data = ytInitialPlayerResponse;
+        }
+      } catch {}
+
+      // Method 2: Fetch from Innertube API with page cookies (best chance of direct URLs)
+      if (!data?.streamingData) {
+        try { data = await fetchPlayerFromPage(videoId); } catch {}
+      }
+
+      // Method 3: Player API
+      if (!data?.streamingData) {
+        try {
+          const p = document.querySelector('#movie_player');
+          if (p?.getPlayerResponse) data = p.getPlayerResponse();
+        } catch {}
+      }
+
+      if (!data?.streamingData) {
+        sendResponse({ error: 'No video data found. Refresh the page.' });
         return;
       }
-      const details = resp.videoDetails || {};
-      const formats = resp.streamingData?.formats || [];
-      const adaptive = resp.streamingData?.adaptiveFormats || [];
+
+      const details = data.videoDetails || {};
+      const formats = data.streamingData?.formats || [];
+      const adaptive = data.streamingData?.adaptiveFormats || [];
+
       sendResponse({
-        videoId: details.videoId || '',
+        videoId: details.videoId || videoId,
         title: details.title || document.title.replace(' - YouTube', '').trim(),
         duration: parseInt(details.lengthSeconds) || 0,
         views: parseInt(details.viewCount) || 0,
         author: details.author || '',
         thumbnail: details.thumbnail?.thumbnails?.[0]?.url || '',
-        url: 'https://www.youtube.com/watch?v=' + (details.videoId || ''),
+        url: 'https://www.youtube.com/watch?v=' + (details.videoId || videoId),
         formats: [...formats, ...adaptive].map(f => ({
           itag: f.itag,
           quality: f.qualityLabel || f.quality,
@@ -67,7 +92,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           audioQuality: f.audioQuality,
         })),
       });
-    });
+    })();
     return true;
   }
 });

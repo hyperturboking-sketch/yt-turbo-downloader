@@ -1,8 +1,6 @@
 // --- Keep service worker alive ---
 chrome.alarms.create('keepalive', { periodInMinutes: 0.4 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'keepalive') {}
-});
+chrome.alarms.onAlarm.addListener(() => {});
 
 // --- Pro License System ---
 const FREE_MAX_QUALITY = 1080;
@@ -60,112 +58,53 @@ function sanitizeFilename(name) {
   return (name || 'video').replace(/[<>:"/\\|?*\n\r]/g, '_').replace(/\s+/g, ' ').trim().substring(0, 150);
 }
 
-// --- Innertube API (multiple clients) ---
-const CLIENTS = [
-  { clientName: 'MWEB', clientVersion: '2.20250722.07.00', hl: 'en', gl: 'US' },
-  { clientName: 'WEB', clientVersion: '2.20250722.07.00', hl: 'en', gl: 'US' },
-  { clientName: 'ANDROID', clientVersion: '19.29.37', hl: 'en', gl: 'US', androidSdkVersion: 34, osName: 'Android', osVersion: '14', platform: 'MOBILE' },
-];
-
-const CLIENT_IDS = { MWEB: 2, WEB: 1, ANDROID: 3 };
-
-async function innertubePlayer(videoId) {
-  for (const client of CLIENTS) {
-    try {
-      const body = {
-        context: { client },
-        videoId,
-        contentCheckOk: true,
-        racyCheckOk: true,
-      };
-
-      const resp = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Youtube-Client-Name': String(CLIENT_IDS[client.clientName] || 1),
-          'X-Youtube-Client-Version': client.clientVersion,
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
-          'Origin': 'https://www.youtube.com',
-          'Referer': 'https://www.youtube.com/',
-        },
-        body: JSON.stringify(body),
-      });
-
-      if (!resp.ok) continue;
-      const data = await resp.json();
-      if (data.streamingData?.formats?.length || data.streamingData?.adaptiveFormats?.length) {
-        return data;
-      }
-    } catch {}
-  }
-  return null;
-}
-
-// --- Get video data: try open tab first, then API ---
+// --- Get video data: content script on YouTube page (same-origin, has cookies) ---
 async function getPageData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
 
-  // Method 1: Read from open YouTube tab via executeScript
+  // Find the YouTube tab with this video
   const tabs = await chrome.tabs.query({ url: '*://www.youtube.com/*' });
+  let targetTab = null;
   for (const tab of tabs) {
-    if (extractVideoId(tab.url) !== videoId) continue;
-    try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        world: 'MAIN',
-        func: () => {
-          try {
-            if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
-              return JSON.parse(JSON.stringify(ytInitialPlayerResponse));
-            }
-            const p = document.querySelector('#movie_player');
-            if (p?.getPlayerResponse) return JSON.parse(JSON.stringify(p.getPlayerResponse()));
-            return null;
-          } catch { return null; }
-        },
-      });
-      const result = results?.[0]?.result;
-      if (result?.streamingData && result?.videoDetails?.videoId === videoId) {
-        return buildVideoData(result, videoId);
-      }
-    } catch {}
-    break;
+    if (extractVideoId(tab.url) === videoId) { targetTab = tab; break; }
   }
 
-  // Method 2: Innertube API
-  const data = await innertubePlayer(videoId);
-  if (data) return buildVideoData(data, videoId);
+  if (!targetTab) {
+    throw new Error('Navigate to this video on YouTube first, then try again.');
+  }
 
-  throw new Error('Could not load video data. Make sure the video is open in a YouTube tab.');
-}
+  // Ensure content script is injected
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: targetTab.id },
+      files: ['content.js'],
+    });
+  } catch {}
 
-function buildVideoData(response, videoId) {
-  const details = response.videoDetails || {};
-  const formats = response.streamingData?.formats || [];
-  const adaptive = response.streamingData?.adaptiveFormats || [];
-  return {
-    videoId: details.videoId || videoId,
-    title: details.title || 'Unknown',
-    duration: parseInt(details.lengthSeconds) || 0,
-    views: parseInt(details.viewCount) || 0,
-    author: details.author || '',
-    thumbnail: details.thumbnail?.thumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-    url: `https://www.youtube.com/watch?v=${videoId}`,
-    formats: [...formats, ...adaptive].map(f => ({
-      itag: f.itag,
-      quality: f.qualityLabel || f.quality,
-      mimeType: f.mimeType,
-      width: f.width,
-      height: f.height,
-      bitrate: f.bitrate,
-      contentLength: f.contentLength,
-      url: f.url || null,
-      signatureCipher: f.signatureCipher || null,
-      audioQuality: f.audioQuality,
-    })),
-  };
+  // Wait for content script to be ready
+  await new Promise(r => setTimeout(r, 500));
+
+  // Ask content script to get data (it runs on youtube.com with cookies)
+  try {
+    const response = await chrome.tabs.sendMessage(targetTab.id, {
+      type: 'GET_PAGE_DATA',
+      videoId,
+    });
+
+    if (response?.error) throw new Error(response.error);
+    if (response?.formats?.length) return response;
+  } catch (e) {
+    if (e.message?.includes('Could not establish connection')) {
+      // Content script not ready, wait and retry
+      await new Promise(r => setTimeout(r, 1000));
+      const retry = await chrome.tabs.sendMessage(targetTab.id, { type: 'GET_PAGE_DATA', videoId });
+      if (!retry?.error && retry?.formats?.length) return retry;
+    }
+    throw e;
+  }
+
+  throw new Error('Could not load video data. Refresh the YouTube tab and try again.');
 }
 
 // --- Format picking ---
@@ -179,9 +118,9 @@ function pickFormat(formats, maxH) {
 function pickBestAudio(formats, qualityTier) {
   const af = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url);
   if (!af.length) return null;
-  const pool = af.filter(f => f.mimeType?.includes('mp4') || f.mimeType?.includes('audio/mp4'));
-  if (!pool.length) af.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-  const sorted = pool.length ? pool.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0)) : af;
+  const m4a = af.filter(f => f.mimeType?.includes('mp4') || f.mimeType?.includes('audio/mp4'));
+  const sorted = m4a.length ? m4a : af;
+  sorted.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
   const max = { high: 999999, medium: 192000, low: 96000 }[qualityTier] || 192000;
   return sorted.find(f => (f.bitrate || 0) <= max) || sorted[sorted.length - 1];
 }
@@ -228,7 +167,7 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
     return { success: true, filename, note: 'Video only (no audio)' };
   }
 
-  throw new Error('No downloadable format found.');
+  throw new Error('No downloadable format found. YouTube may require sign-in for this video.');
 }
 
 // --- Message handler ---
