@@ -1,71 +1,74 @@
-// Content script - bridges between YouTube page and extension
+// Content script - runs on youtube.com pages
 
-// Listen for requests from background/popup
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'GET_PAGE_DATA') {
-    // Inject a script into the PAGE's main world to read ytInitialPlayerResponse
-    const script = document.createElement('script');
-    script.textContent = `
-      (function() {
-        try {
-          let data = null;
-          if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
-            data = ytInitialPlayerResponse;
-          }
-          const el = document.getElementById('__yt_turbo_data__');
-          if (el) el.textContent = JSON.stringify(data);
-          window.postMessage({ type: '__YT_TURBO_DATA__', data: data }, '*');
-        } catch(e) {
-          window.postMessage({ type: '__YT_TURBO_DATA__', data: null }, '*');
-        }
-      })();
-    `;
-    document.documentElement.appendChild(script);
-    script.remove();
+// Inject page-context script to read player data
+function getPlayerResponse() {
+  return new Promise((resolve) => {
+    const id = '__yt_turbo_' + Date.now();
 
-    // Listen for the response from the page script
-    function handler(e) {
-      if (e.data?.type === '__YT_TURBO_DATA__') {
-        window.removeEventListener('message', handler);
-        const resp = e.data.data;
-        if (resp) {
-          const details = resp.videoDetails || {};
-          const formats = resp.streamingData?.formats || [];
-          const adaptive = resp.streamingData?.adaptiveFormats || [];
-          sendResponse({
-            videoId: details.videoId || '',
-            title: details.title || document.title.replace(' - YouTube', '').trim(),
-            duration: parseInt(details.lengthSeconds) || 0,
-            views: parseInt(details.viewCount) || 0,
-            author: details.author || '',
-            thumbnail: details.thumbnail?.thumbnails?.[0]?.url || '',
-            url: 'https://www.youtube.com/watch?v=' + (details.videoId || ''),
-            formats: [...formats, ...adaptive].map(f => ({
-              itag: f.itag,
-              quality: f.qualityLabel || f.quality,
-              mimeType: f.mimeType,
-              width: f.width,
-              height: f.height,
-              bitrate: f.bitrate,
-              contentLength: f.contentLength,
-              url: f.url,
-              signatureCipher: f.signatureCipher,
-              audioQuality: f.audioQuality,
-            })),
-          });
-        } else {
-          sendResponse({ error: 'Could not extract video data. Try refreshing the page.' });
-        }
+    // Listen for response
+    function onMsg(e) {
+      if (e.data?.id === id) {
+        window.removeEventListener('message', onMsg);
+        resolve(e.data.result);
       }
     }
-    window.addEventListener('message', handler);
-    // Timeout after 3s
-    setTimeout(() => {
-      window.removeEventListener('message', handler);
-      sendResponse({ error: 'Timeout reading video data. Try refreshing the page.' });
-    }, 3000);
+    window.addEventListener('message', onMsg);
 
-    return true; // async response
+    // Inject script into page world via DOM
+    const s = document.createElement('script');
+    s.textContent = `window.postMessage({id:"${id}",result:(function(){
+      try {
+        if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
+          return ytInitialPlayerResponse;
+        }
+        // Try from player API
+        const p = document.querySelector('#movie_player');
+        if (p && p.getPlayerResponse) return p.getPlayerResponse();
+        return null;
+      } catch(e) { return null; }
+    })()})`;
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+
+    // Timeout
+    setTimeout(() => { window.removeEventListener('message', onMsg); resolve(null); }, 2000);
+  });
+}
+
+// Handle messages from background
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'GET_PAGE_DATA') {
+    getPlayerResponse().then(resp => {
+      if (!resp?.streamingData) {
+        sendResponse({ error: 'No video data found. Refresh the page and try again.' });
+        return;
+      }
+      const details = resp.videoDetails || {};
+      const formats = resp.streamingData?.formats || [];
+      const adaptive = resp.streamingData?.adaptiveFormats || [];
+      sendResponse({
+        videoId: details.videoId || '',
+        title: details.title || document.title.replace(' - YouTube', '').trim(),
+        duration: parseInt(details.lengthSeconds) || 0,
+        views: parseInt(details.viewCount) || 0,
+        author: details.author || '',
+        thumbnail: details.thumbnail?.thumbnails?.[0]?.url || '',
+        url: 'https://www.youtube.com/watch?v=' + (details.videoId || ''),
+        formats: [...formats, ...adaptive].map(f => ({
+          itag: f.itag,
+          quality: f.qualityLabel || f.quality,
+          mimeType: f.mimeType,
+          width: f.width,
+          height: f.height,
+          bitrate: f.bitrate,
+          contentLength: f.contentLength,
+          url: f.url || null,
+          signatureCipher: f.signatureCipher || null,
+          audioQuality: f.audioQuality,
+        })),
+      });
+    });
+    return true;
   }
 });
 

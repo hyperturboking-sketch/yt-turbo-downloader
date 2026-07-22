@@ -3,24 +3,14 @@ const FREE_MAX_QUALITY = 1080;
 
 async function getProStatus() {
   const data = await chrome.storage.local.get(['isPro', 'licenseKey', 'activatedAt']);
-  return {
-    isPro: !!data.isPro,
-    licenseKey: data.licenseKey || null,
-    activatedAt: data.activatedAt || null,
-  };
+  return { isPro: !!data.isPro, licenseKey: data.licenseKey || null, activatedAt: data.activatedAt || null };
 }
 
 async function activateLicense(key) {
-  if (!/^YTT-[A-Z0-9]{6}-[A-Z0-9]{6}$/i.test(key)) {
-    throw new Error('Invalid key format. Expected: YTT-XXXXXX-XXXXXX');
-  }
+  if (!/^YTT-[A-Z0-9]{6}-[A-Z0-9]{6}$/i.test(key)) throw new Error('Invalid key format. Expected: YTT-XXXXXX-XXXXXX');
   const valid = await validateKeyWithServer(key);
   if (!valid) throw new Error('Invalid or expired license key');
-  await chrome.storage.local.set({
-    isPro: true,
-    licenseKey: key,
-    activatedAt: new Date().toISOString(),
-  });
+  await chrome.storage.local.set({ isPro: true, licenseKey: key, activatedAt: new Date().toISOString() });
   return { success: true, message: 'Pro activated!' };
 }
 
@@ -39,9 +29,7 @@ async function validateKeyWithServer(key) {
     });
     const data = await resp.json();
     return data.valid === true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 async function getMachineId() {
@@ -68,108 +56,59 @@ function extractVideoId(url) {
 }
 
 function sanitizeFilename(name) {
-  return (name || 'video')
-    .replace(/[<>:"/\\|?*\n\r]/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .substring(0, 150);
+  return (name || 'video').replace(/[<>:"/\\|?*\n\r]/g, '_').replace(/\s+/g, ' ').trim().substring(0, 150);
 }
 
-// --- Fetch YouTube page and extract video data ---
-async function fetchYouTubePage(videoId) {
-  const resp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-  });
-  if (!resp.ok) throw new Error(`YouTube returned ${resp.status}`);
-  return resp.text();
-}
-
-function extractPlayerResponse(html) {
-  // Method 1: ytInitialPlayerResponse global
-  const patterns = [
-    /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/,
-    /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/,
-  ];
-  for (const pat of patterns) {
-    const match = html.match(pat);
-    if (match) {
-      try {
-        const data = JSON.parse(match[1]);
-        if (data?.streamingData) return data;
-      } catch {}
-    }
-  }
-
-  // Method 2: embedded in a script tag as JSON
-  const jsonMatch = html.match(/"videoDetails":\s*(\{[^}]+\})/);
-  if (jsonMatch) {
-    try {
-      // Try to find the full player response around this
-      const idx = html.indexOf('"streamingData"');
-      if (idx > 0) {
-        // Find the enclosing object
-        let depth = 0;
-        let start = idx;
-        while (start > 0) {
-          start--;
-          if (html[start] === '{') depth++;
-          if (html[start] === '}') depth--;
-          if (depth === 1 && html[start - 1] === '=') { start++; break; }
-          if (depth === 0 && start < idx - 10000) break;
-        }
-        const chunk = html.substring(start, idx + 5000);
-        const m2 = chunk.match(/\{[\s\S]*"streamingData"[\s\S]*?\}\s*\}/);
-        if (m2) {
-          try { return JSON.parse(m2[0]); } catch {}
-        }
-      }
-    } catch {}
-  }
-
-  return null;
-}
-
+// --- Get video data from YouTube tab ---
 async function getPageData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
 
-  // First try: read from an open tab
-  const tabs = await chrome.tabs.query({ url: 'https://www.youtube.com/*' });
-  const targetTab = tabs.find(t => extractVideoId(t.url) === videoId);
+  // Find the exact tab with this video
+  const tabs = await chrome.tabs.query({ url: '*://www.youtube.com/*' });
+  let targetTab = null;
+  for (const tab of tabs) {
+    const tid = extractVideoId(tab.url);
+    if (tid === videoId) { targetTab = tab; break; }
+  }
 
-  if (targetTab) {
-    try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: targetTab.id },
-        world: 'MAIN',
-        func: () => {
+  if (!targetTab) {
+    throw new Error('Navigate to this video on YouTube first, then try again.');
+  }
+
+  // Try executeScript in MAIN world (bypasses CSP and isolated world)
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: targetTab.id },
+      world: 'MAIN',
+      func: (vid) => {
+        try {
+          // Direct global check
           if (typeof ytInitialPlayerResponse !== 'undefined' && ytInitialPlayerResponse?.streamingData) {
-            return ytInitialPlayerResponse;
+            const vd = ytInitialPlayerResponse.videoDetails;
+            if (vd && vd.videoId === vid) return ytInitialPlayerResponse;
+          }
+          // SPA player API
+          const p = document.querySelector('#movie_player');
+          if (p && typeof p.getPlayerResponse === 'function') {
+            const resp = p.getPlayerResponse();
+            if (resp?.streamingData) {
+              const vd = resp.videoDetails;
+              if (vd && vd.videoId === vid) return resp;
+            }
           }
           return null;
-        },
-      });
-      if (results?.[0]?.result?.streamingData) {
-        return buildVideoData(results[0].result, videoId);
-      }
-    } catch {}
-  }
+        } catch (e) { return null; }
+      },
+      args: [videoId],
+    });
 
-  // Fallback: fetch the page HTML and parse it
-  try {
-    const html = await fetchYouTubePage(videoId);
-    const playerResponse = extractPlayerResponse(html);
-    if (playerResponse) {
-      return buildVideoData(playerResponse, videoId);
+    if (results?.[0]?.result?.streamingData) {
+      return buildVideoData(results[0].result, videoId);
     }
-  } catch (e) {
-    throw new Error('Failed to fetch video: ' + e.message);
-  }
+  } catch {}
 
-  throw new Error('Could not load video data. Try refreshing the page.');
+  throw new Error('Could not read video data. Refresh the YouTube tab and try again.');
 }
 
 function buildVideoData(response, videoId) {
@@ -178,13 +117,12 @@ function buildVideoData(response, videoId) {
   const adaptive = response.streamingData?.adaptiveFormats || [];
 
   return {
-    videoId,
+    videoId: details.videoId || videoId,
     title: details.title || 'Unknown',
     duration: parseInt(details.lengthSeconds) || 0,
     views: parseInt(details.viewCount) || 0,
     author: details.author || '',
-    thumbnail: details.thumbnail?.thumbnails?.[0]?.url
-      || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    thumbnail: details.thumbnail?.thumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
     url: `https://www.youtube.com/watch?v=${videoId}`,
     formats: [...formats, ...adaptive].map(f => ({
       itag: f.itag,
@@ -194,8 +132,8 @@ function buildVideoData(response, videoId) {
       height: f.height,
       bitrate: f.bitrate,
       contentLength: f.contentLength,
-      url: f.url,
-      signatureCipher: f.signatureCipher,
+      url: f.url || null,
+      signatureCipher: f.signatureCipher || null,
       audioQuality: f.audioQuality,
     })),
   };
@@ -203,7 +141,7 @@ function buildVideoData(response, videoId) {
 
 // --- Format picking ---
 function pickFormat(formats, maxH) {
-  const videoFormats = formats.filter(f => f.mimeType?.startsWith('video/'));
+  const videoFormats = formats.filter(f => f.mimeType?.startsWith('video/') && f.url);
   const sorted = videoFormats
     .filter(f => !maxH || (f.height && f.height <= maxH))
     .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bitrate || 0) - (a.bitrate || 0));
@@ -212,7 +150,7 @@ function pickFormat(formats, maxH) {
 }
 
 function pickBestAudio(formats, qualityTier) {
-  const audioFormats = formats.filter(f => f.mimeType?.startsWith('audio/'));
+  const audioFormats = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url);
   if (!audioFormats.length) return null;
   const m4a = audioFormats.filter(f => f.mimeType?.includes('mp4') || f.mimeType?.includes('audio/mp4'));
   const webm = audioFormats.filter(f => f.mimeType?.includes('webm'));
@@ -226,7 +164,7 @@ function pickBestAudio(formats, qualityTier) {
 async function fetchInfo(url) {
   const data = await getPageData(url);
   const h264Only = (data.formats || []).filter(f =>
-    f.mimeType?.includes('avc1') && f.mimeType?.startsWith('video/')
+    f.mimeType?.includes('avc1') && f.mimeType?.startsWith('video/') && f.url
   ).sort((a, b) => (b.height || 0) - (a.height || 0));
   return { ...data, formats: h264Only };
 }
@@ -254,6 +192,7 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
   }
 
   // --- VIDEO ---
+  // Try combined (video+audio) first
   const bestCombined = combined
     .filter(f => f.height && f.height <= maxH)
     .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
@@ -265,6 +204,7 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
     return { success: true, filename };
   }
 
+  // Adaptive video only
   const bestVideo = pickFormat(adaptive.length ? adaptive : all, maxH);
   if (bestVideo?.url) {
     const ext = bestVideo.mimeType?.includes('webm') ? 'webm' : 'mp4';
@@ -273,21 +213,18 @@ async function downloadVideo(url, quality, title, format = 'video', audioQuality
     return { success: true, filename, note: 'Video only (no audio)' };
   }
 
-  throw new Error('No downloadable format found.');
+  throw new Error('No downloadable format found. YouTube may require sign-in for this video.');
 }
 
 // --- Message handler ---
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'FETCH_INFO') {
-    fetchInfo(msg.url)
-      .then(data => sendResponse(data))
-      .catch(e => sendResponse({ error: e.message }));
+    fetchInfo(msg.url).then(d => sendResponse(d)).catch(e => sendResponse({ error: e.message }));
     return true;
   }
   if (msg.type === 'DOWNLOAD') {
     downloadVideo(msg.url, msg.quality, msg.title, msg.format, msg.audioQuality)
-      .then(data => sendResponse(data))
-      .catch(e => sendResponse({ error: e.message }));
+      .then(d => sendResponse(d)).catch(e => sendResponse({ error: e.message }));
     return true;
   }
   if (msg.type === 'GET_PRO_STATUS') {
